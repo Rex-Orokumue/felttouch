@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "felttouch",
+    "slug": "felttouch",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "We use your location to auto-fill visit coordinates on reports."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.rexorokumue.felttouch"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app needs access to your photos to let you share images.",
+          "cameraPermission": "The app needs access to your camera to let you take photos."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d8ee6594-ff98-48ed-bd8d-38e395eb477d"
+      }
+    }
+  }
+}
