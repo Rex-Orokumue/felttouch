@@ -13,22 +13,48 @@ import {
   Modal,
   Dimensions,
   Linking,
+  ActivityIndicator,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../App';
 import { Report } from './ReportsScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import axios from 'axios';
+import { getMyReports, updateReport, deleteReport, syncReports } from '../src/services/api';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ReportDetails'>;
 
-const STORAGE_KEY = (productId: string) => `reports:${productId}`;
+const STORAGE_KEY = (productId: string, userId: string) => `reports:${userId}:${productId}`;
 
 const { width } = Dimensions.get('window');
+
+// API configuration
+const api = axios.create({
+  baseURL: "https://reporting.felttouch.com",
+  headers: { 
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  timeout: 15000,
+});
+
+// Attach token if saved
+api.interceptors.request.use(async (config) => {
+  const token = await AsyncStorage.getItem("token");
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// API functions for reports
+const updateReportAPI = updateReport
+
+const deleteReportAPI = deleteReport
 
 export default function ReportDetailsScreen({ route, navigation }: Props) {
   const { report, productId } = route.params;
 
   const [editing, setEditing] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [clientName, setClientName] = useState(report.clientName);
   const [clientAddress, setClientAddress] = useState(report.clientAddress || '');
   const [town, setTown] = useState(report.town || '');
@@ -49,64 +75,236 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
   const [imageModalVisible, setImageModalVisible] = useState(false);
 
   const saveChanges = async () => {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY(productId));
-      let reports: Report[] = raw ? JSON.parse(raw) : [];
+  if (loading) return;
+  
+  setLoading(true);
+  try {
+    const now = new Date().toISOString();
+    const updatedReportData = {
+      clientName,
+      clientAddress,
+      town,
+      localGovernment,
+      state,
+      community,
+      nearestLandmark,
+      latitude,
+      longitude,
+      contactPerson,
+      contactPhone,
+      visitDate,
+      serviceType,
+      status,
+      notes,
+      updatedAt: now,
+    };
 
-      reports = reports.map((r) =>
-        r.id === report.id
-          ? {
-              ...r,
-              clientName,
-              clientAddress,
-              town,
-              localGovernment,
-              state,
-              community,
-              nearestLandmark,
-              latitude,
-              longitude,
-              contactPerson,
-              contactPhone,
-              visitDate,
-              serviceType,
-              status,
-              notes,
-              updatedAt: new Date().toISOString(),
-            }
-          : r
-      );
-
-      await AsyncStorage.setItem(STORAGE_KEY(productId), JSON.stringify(reports));
-      Alert.alert('Success', 'Report updated successfully.');
-      setEditing(false);
-    } catch (err) {
-      Alert.alert('Error', 'Failed to update report.');
+    // Get user ID consistently
+    const userId = await AsyncStorage.getItem('user_id');
+    if (!userId) {
+      Alert.alert('Error', 'User not found. Please login again.');
+      return;
     }
-  };
+
+    const storageKey = STORAGE_KEY(productId, userId);
+    console.log('Updating report with ID:', report.id);
+    console.log('Storage key:', storageKey);
+
+    // Get current reports from storage
+    const localData = await AsyncStorage.getItem(storageKey);
+    let reports: Report[] = localData ? JSON.parse(localData) : [];
+    
+    console.log('Current reports count:', reports.length);
+    console.log('Looking for report ID:', report.id);
+
+    // Find and update the specific report by ID
+    const reportIndex = reports.findIndex(r => r.id === report.id);
+    console.log('Found report at index:', reportIndex);
+
+    if (reportIndex !== -1) {
+      // Update existing report - keep the same ID and serverId
+      const updatedReport = {
+        ...reports[reportIndex], // Keep all existing data
+        ...updatedReportData,    // Apply updates
+        id: reports[reportIndex].id, // Ensure ID doesn't change
+        serverId: reports[reportIndex].serverId, // Ensure serverId doesn't change
+      };
+      
+      reports[reportIndex] = updatedReport;
+      console.log('Updated report:', updatedReport.clientName, 'with ID:', updatedReport.id);
+    } else {
+      console.error('Report not found in local storage!');
+      Alert.alert('Error', 'Report not found. Please try again.');
+      return;
+    }
+
+    // Save to local storage
+    await AsyncStorage.setItem(storageKey, JSON.stringify(reports));
+    console.log('Local storage updated successfully');
+
+    // Try to update on server
+    let serverUpdateSuccess = false;
+    if (reports[reportIndex].serverId) {
+      console.log('Attempting server update for serverId:', reports[reportIndex].serverId);
+      try {
+        const serverUpdateData = {
+          schoolName: clientName,
+          schoolAddress: clientAddress,
+          town,
+          localGovernment,
+          state,
+          community,
+          nearestBusStop: nearestLandmark,
+          latitude: parseFloat(latitude) || 0,
+          longitude: parseFloat(longitude) || 0,
+          contactPerson,
+          contactPhone,
+          reportDate: visitDate,
+          benchmark: serviceType,
+        };
+
+        console.log('Sending to server:', serverUpdateData);
+        await updateReport(reports[reportIndex].serverId, serverUpdateData);
+        console.log('Server update successful');
+        serverUpdateSuccess = true;
+
+      } catch (serverError: any) {
+        console.error('Server update failed:', serverError);
+        if (serverError.response?.status === 404) {
+          console.log('Server report not found, marking for re-sync');
+          // Don't remove serverId, just log the issue
+        }
+      }
+    } else {
+      console.log('No serverId available for server update');
+    }
+
+    // Update the current report object to reflect changes
+    Object.assign(report, reports[reportIndex]);
+
+    Alert.alert('Success', 'Report updated successfully.');
+    setEditing(false);
+
+    // Navigate back and trigger refresh
+    navigation.setParams({ 
+      report: reports[reportIndex], // Pass the updated report back
+      refresh: true 
+    });
+    navigation.navigate('Reports', { 
+      productId, 
+      productName: route.params.productName,
+      refresh: true 
+    });
+    
+  } catch (error: any) {
+    console.error('Failed to update report:', error);
+    Alert.alert('Error', 'Failed to update report. Please try again.');
+  } finally {
+    setLoading(false);
+  }
+};
 
   const deleteReport = async () => {
-    Alert.alert('Delete Report', 'Are you sure you want to delete this report?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const raw = await AsyncStorage.getItem(STORAGE_KEY(productId));
-            let reports: Report[] = raw ? JSON.parse(raw) : [];
-            reports = reports.filter((r) => r.id !== report.id);
-
-            await AsyncStorage.setItem(STORAGE_KEY(productId), JSON.stringify(reports));
-            Alert.alert('Deleted', 'Report deleted successfully.');
-            navigation.goBack();
-          } catch (err) {
-            Alert.alert('Error', 'Failed to delete report.');
+  Alert.alert('Delete Report', 'Are you sure you want to delete this report?', [
+    { text: 'Cancel', style: 'cancel' },
+    {
+      text: 'Delete',
+      style: 'destructive',
+      onPress: async () => {
+        if (loading) return;
+        
+        setLoading(true);
+        try {
+          // Always delete from local storage first
+          const userData = await AsyncStorage.getItem('user');
+          const userId = userData ? JSON.parse(userData).id : await AsyncStorage.getItem('user_id');
+          
+          if (!userId) {
+            Alert.alert('Error', 'User not found. Please login again.');
+            return;
           }
-        },
+
+          const localData = await AsyncStorage.getItem(STORAGE_KEY(productId, userId));
+          let reports: Report[] = localData ? JSON.parse(localData) : [];
+          
+          // Remove from local storage
+          reports = reports.filter(r => r.id !== report.id);
+          await AsyncStorage.setItem(STORAGE_KEY(productId, userId), JSON.stringify(reports));
+          console.log('Local delete completed successfully');
+
+          // Try to delete from server if it's a server report
+          if (report.serverId && !report.id.startsWith('server_')) {
+            try {
+              console.log('Attempting server delete for serverId:', report.serverId);
+              await deleteReportAPI(report.serverId);
+              console.log('Server delete completed successfully');
+            } catch (serverError: any) {
+              console.error('Server delete failed:', serverError);
+              // Continue anyway since local delete succeeded
+            }
+          } else {
+            console.log('Skipping server delete - local-only report or no serverId');
+          }
+
+          Alert.alert('Deleted', 'Report deleted successfully.');
+          navigation.navigate('Reports', { 
+            productId, 
+            productName: route.params.productName,
+            refresh: true 
+          });
+          
+        } catch (error: any) {
+          console.error('Failed to delete report:', error);
+          Alert.alert('Error', 'Failed to delete report locally.');
+        } finally {
+          setLoading(false);
+        }
       },
-    ]);
-  };
+    },
+  ]);
+};
+
+  const refreshReportData = async () => {
+  if (loading) return;
+  
+  setLoading(true);
+  try {
+    const reportsData = await getMyReports();
+    const updatedReport = reportsData.find((r: any) => {
+      // Match using reportId since that's what the server uses
+      return r.reportId === report.serverId || 
+             (r.schoolName === report.clientName && 
+              r.reportDate === (report.visitDate || report.meetingDate) &&
+              r.contactPhone === (report.contactPhone || report.contact));
+    });
+    
+    if (updatedReport) {
+      // Update state with server data format
+      setClientName(updatedReport.schoolName || '');
+      setClientAddress(updatedReport.schoolAddress || '');
+      setTown(updatedReport.town || '');
+      setLocalGovernment(updatedReport.localGovernment || '');
+      setState(updatedReport.state || '');
+      setCommunity(updatedReport.community || '');
+      setNearestLandmark(updatedReport.nearestBusStop || '');
+      setLatitude(String(updatedReport.latitude || ''));
+      setLongitude(String(updatedReport.longitude || ''));
+      setContactPerson(updatedReport.contactPerson || '');
+      setContactPhone(updatedReport.contactPhone || '');
+      setVisitDate(updatedReport.reportDate || '');
+      setServiceType(updatedReport.benchmark || '');
+      setStatus(report.status); // Keep local status since server doesn't have it
+      setNotes(report.notes); // Keep local notes since server doesn't have it
+      
+      // Update the report object with correct server ID
+      report.serverId = updatedReport.reportId;
+    }
+  } catch (error: any) {
+    console.error('Failed to refresh report data:', error);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const openLocationOnMap = async () => {
     const lat = parseFloat(latitude);
@@ -171,6 +369,7 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
           multiline={multiline}
           textAlignVertical={multiline ? 'top' : 'center'}
           placeholderTextColor="#9CA3AF"
+          editable={!loading}
         />
       ) : (
         <View style={styles.valueContainer}>
@@ -191,11 +390,20 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
     </View>
   );
 
+  const renderReadOnlyField = (label: string, value: string) => (
+    <View style={styles.fieldContainer}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <View style={styles.valueContainer}>
+        <Text style={styles.fieldValue}>{value || '—'}</Text>
+      </View>
+    </View>
+  );
+
   const renderLocationField = () => (
     <View style={styles.fieldContainer}>
       <View style={styles.coordinatesHeader}>
         <Text style={styles.fieldLabel}>Coordinates</Text>
-        {!editing && latitude && longitude && (
+        {latitude && longitude && (
           <TouchableOpacity style={styles.mapButton} onPress={openLocationOnMap}>
             <Image 
               source={{ uri: 'https://cdn-icons-png.flaticon.com/512/854/854878.png' }} 
@@ -207,10 +415,20 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
       </View>
       <View style={styles.twoColumnContainer}>
         <View style={styles.halfColumn}>
-          {renderField('Latitude', latitude, setLatitude)}
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>Latitude</Text>
+            <View style={styles.valueContainer}>
+              <Text style={styles.fieldValue}>{latitude || '—'}</Text>
+            </View>
+          </View>
         </View>
         <View style={styles.halfColumn}>
-          {renderField('Longitude', longitude, setLongitude)}
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>Longitude</Text>
+            <View style={styles.valueContainer}>
+              <Text style={styles.fieldValue}>{longitude || '—'}</Text>
+            </View>
+          </View>
         </View>
       </View>
     </View>
@@ -225,6 +443,7 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
           value={status}
           onChangeText={(text) => setStatus(text as Report['status'])}
           placeholderTextColor="#9CA3AF"
+          editable={!loading}
         />
       ) : (
         <View style={styles.statusContainer}>
@@ -291,13 +510,29 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
     }
   };
 
+const syncReportToServer = async (reportData: any) => {
+  return await createReport(reportData);
+};
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
       
+      {/* Loading Overlay */}
+      {loading && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color="#007AFF" />
+          <Text style={styles.loadingText}>Processing...</Text>
+        </View>
+      )}
+      
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+        <TouchableOpacity 
+          onPress={() => navigation.goBack()} 
+          style={styles.backButton}
+          disabled={loading}
+        >
           <Image 
             source={{ uri: 'https://cdn-icons-png.flaticon.com/512/271/271220.png' }} 
             style={styles.backIcon} 
@@ -310,7 +545,16 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
             ID: #{report.id.slice(-8).toUpperCase()}
           </Text>
         </View>
-        <View style={styles.placeholder} />
+        <TouchableOpacity 
+          onPress={refreshReportData} 
+          style={styles.refreshButton}
+          disabled={loading}
+        >
+          <Image 
+            source={{ uri: 'https://cdn-icons-png.flaticon.com/512/2805/2805355.png' }} 
+            style={styles.refreshIcon} 
+          />
+        </TouchableOpacity>
       </View>
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
@@ -362,7 +606,7 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
               <Text style={styles.sectionTitle}>Service Details</Text>
             </View>
             {renderField('Service Type', serviceType, setServiceType)}
-            {renderField('Visit Date', visitDate, setVisitDate)}
+            {renderReadOnlyField('Visit Date', visitDate)}
             {renderStatusField()}
           </View>
 
@@ -423,7 +667,7 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
         {editing ? (
           <View style={styles.actionRow}>
             <TouchableOpacity
-              style={[styles.actionButton, styles.cancelButton]}
+              style={[styles.actionButton, styles.cancelButton, loading && styles.disabledButton]}
               onPress={() => {
                 setEditing(false);
                 // Reset all fields to original values
@@ -443,6 +687,7 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
                 setStatus(report.status);
                 setNotes(report.notes);
               }}
+              disabled={loading}
             >
               <Image 
                 source={{ uri: 'https://cdn-icons-png.flaticon.com/512/1828/1828843.png' }} 
@@ -451,21 +696,29 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.actionButton, styles.saveButton]}
+              style={[styles.actionButton, styles.saveButton, loading && styles.disabledButton]}
               onPress={saveChanges}
+              disabled={loading}
             >
-              <Image 
-                source={{ uri: 'https://cdn-icons-png.flaticon.com/512/190/190411.png' }} 
-                style={styles.actionButtonIcon} 
-              />
-              <Text style={styles.saveButtonText}>Save Changes</Text>
+              {loading ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Image 
+                  source={{ uri: 'https://cdn-icons-png.flaticon.com/512/190/190411.png' }} 
+                  style={styles.actionButtonIcon} 
+                />
+              )}
+              <Text style={styles.saveButtonText}>
+                {loading ? 'Saving...' : 'Save Changes'}
+              </Text>
             </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.actionRow}>
             <TouchableOpacity
-              style={[styles.actionButton, styles.deleteButton]}
+              style={[styles.actionButton, styles.deleteButton, loading && styles.disabledButton]}
               onPress={deleteReport}
+              disabled={loading}
             >
               <Image 
                 source={{ uri: 'https://cdn-icons-png.flaticon.com/512/3096/3096673.png' }} 
@@ -474,8 +727,9 @@ export default function ReportDetailsScreen({ route, navigation }: Props) {
               <Text style={styles.deleteButtonText}>Delete</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.actionButton, styles.editButton]}
+              style={[styles.actionButton, styles.editButton, loading && styles.disabledButton]}
               onPress={() => setEditing(true)}
+              disabled={loading}
             >
               <Image 
                 source={{ uri: 'https://cdn-icons-png.flaticon.com/512/1159/1159633.png' }} 

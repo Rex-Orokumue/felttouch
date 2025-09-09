@@ -12,11 +12,14 @@ import {
   StatusBar,
   Dimensions,
   Animated,
-  BackHandler
+  BackHandler,
+  Image,
 } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { RootStackParamList } from '../App';
+import { login } from "../src/services/api"; // adjust path if needed
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type LoginScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -35,6 +38,18 @@ export default function LoginScreen() {
   const [error, setError] = useState('');
   const [emailFocused, setEmailFocused] = useState(false);
   const [passwordFocused, setPasswordFocused] = useState(false);
+
+  const [loginKey, setLoginKey] = useState(Date.now());
+  
+useFocusEffect(
+  React.useCallback(() => {
+    // Reset form state to allow fresh autofill
+    setEmail('');
+    setPassword('');
+    setError('');
+    setLoginKey(Date.now()); // If using Solution 2
+  }, [])
+);
 
   // Animation values
   const [fadeAnim] = useState(new Animated.Value(0));
@@ -82,37 +97,75 @@ export default function LoginScreen() {
     return /\S+@\S+\.\S+/.test(value);
   };
 
-  const handleLogin = () => {
-    setError('');
+  // REPLACE your existing handleLogin function with this updated version:
 
-    if (!email || !password) {
-      setError('Please enter both email and password.');
-      return;
-    }
+const handleLogin = async () => {
+  setError("");
 
-    if (!validateEmail(email)) {
-      setError('Please enter a valid email address.');
-      return;
-    }
+  if (!email || !password) {
+    setError("Please enter both username and password.");
+    return;
+  }
 
-    setLoading(true);
+  setLoading(true);
 
-    // Fake API delay
-    setTimeout(() => {
-      setLoading(false);
-
-      // Mock authentication (you'll replace with API later)
-      if (email === 'test@company.com' && password === 'password123') {
-        // Use reset instead of replace to clear navigation stack
-        navigation.reset({
-          index: 0,
-          routes: [{ name: 'Home' }],
-        });
-      } else {
-        setError('Invalid email or password.');
-      }
-    }, 1500);
+  try {
+    console.log("Attempting login with:", { username: email, password: "***" }); // Don't log actual password in production
+    
+    const resp = await login(email, password);
+    
+    console.log("Login response:", resp); // Add this line
+    
+    if (resp?.token) {
+      // Replace the existing user storage section with:
+if (resp.user) {
+  // Ensure consistent user ID storage
+  const userData = {
+    ...resp.user,
+    id: resp.user.id || resp.user.user_id || resp.user.userId || email,
   };
+  
+  await AsyncStorage.setItem('user', JSON.stringify(userData));
+  await AsyncStorage.setItem('user_id', userData.id);
+} else {
+  const basicUserData = {
+    id: resp.userId || resp.user_id || email,
+    username: email,
+    token: resp.token
+  };
+  await AsyncStorage.setItem('user', JSON.stringify(basicUserData));
+  await AsyncStorage.setItem('user_id', basicUserData.id);
+}     
+      navigation.reset({
+        index: 0,
+        routes: [{ name: "Home" }],
+      });
+    } else {
+      setError("Unexpected response from server.");
+    }
+  } catch (err: any) {
+    console.error("Login failed:", err.response?.data || err.message);
+    
+    // Add more detailed error logging
+    console.log("Full error response:", {
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message
+    });
+    
+    if (!err.response) {
+      setError("Network error. Please check your internet connection.");
+    } else if (err.response.status === 401) {
+      setError("Invalid username or password.");
+    } else if (err.response.status === 404) {
+      setError("User not found.");
+    } else {
+      setError(err.response?.data?.message || "Login failed. Please try again.");
+    }
+  } finally {
+    setLoading(false);
+  }
+};
 
   const EyeIcon = ({ visible }: { visible: boolean }) => (
     <View style={styles.iconContainer}>
@@ -141,19 +194,15 @@ export default function LoginScreen() {
     </View>
   );
 
-  const CompanyLogo = () => (
-    <View style={styles.logoContainer}>
-      <View style={styles.logoOuter}>
-        <View style={styles.logoInner}>
-          <View style={styles.logoIcon}>
-            <View style={styles.chartBar1} />
-            <View style={styles.chartBar2} />
-            <View style={styles.chartBar3} />
-          </View>
-        </View>
-      </View>
-    </View>
-  );
+const CompanyLogo = () => (
+  <View style={styles.logoContainer}>
+    <Image 
+      source={require('../assets/icon.png')} 
+      style={styles.logoImage}
+      resizeMode="contain"
+    />
+  </View>
+);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -201,7 +250,7 @@ export default function LoginScreen() {
 
               {/* Email Input */}
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Email Address</Text>
+                <Text style={styles.label}>Username</Text>
                 <View style={[
                   styles.inputContainer,
                   emailFocused && styles.inputContainerFocused,
@@ -209,8 +258,11 @@ export default function LoginScreen() {
                 ]}>
                   <EmailIcon />
                   <TextInput
+                    autoComplete="email"
+                    textContentType="name"
+                    key={`email-${loginKey}`}
                     style={styles.input}
-                    placeholder="Enter your email address"
+                    placeholder="Enter your username"
                     placeholderTextColor="#999999"
                     value={email}
                     autoCapitalize="none"
@@ -232,6 +284,9 @@ export default function LoginScreen() {
                 ]}>
                   <LockIcon />
                   <TextInput
+                    autoComplete="current-password"
+                    textContentType="password"
+                    key={`password-${loginKey}`}
                     style={styles.passwordInput}
                     placeholder="Enter your password"
                     placeholderTextColor="#999999"
@@ -371,46 +426,10 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 8,
   },
-  logoOuter: {
+  logoImage: {
     width: 80,
     height: 80,
     borderRadius: 20,
-    backgroundColor: '#0081D7',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#0066AA',
-  },
-  logoInner: {
-    width: 64,
-    height: 64,
-    borderRadius: 16,
-    backgroundColor: '#ffffff',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  logoIcon: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 3,
-  },
-  chartBar1: {
-    width: 6,
-    height: 12,
-    backgroundColor: '#0081D7',
-    borderRadius: 3,
-  },
-  chartBar2: {
-    width: 6,
-    height: 20,
-    backgroundColor: '#0066AA',
-    borderRadius: 3,
-  },
-  chartBar3: {
-    width: 6,
-    height: 16,
-    backgroundColor: '#0081D7',
-    borderRadius: 3,
   },
   title: {
     fontSize: 32,

@@ -15,6 +15,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../App';
 import { useFocusEffect } from '@react-navigation/native';
+import { getMyReports } from '../src/services/api';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Reports'>;
 
@@ -22,6 +23,7 @@ type ReportStatus = 'Contacted' | 'Interested' | 'Follow-up' | 'Closed Won' | 'C
 
 export type Report = {
   id: string;
+  serverId?: string;
   productId: string;
   clientName: string;
   clientAddress?: string;
@@ -46,7 +48,7 @@ export type Report = {
   meetingDate?: string; // for backward compatibility
 };
 
-const STORAGE_KEY = (productId: string) => `reports:${productId}`;
+const STORAGE_KEY = (productId: string, userId: string) => `reports:${userId}:${productId}`;
 
 const STATUS_ORDER: ReportStatus[] = [
   'Contacted',
@@ -96,57 +98,210 @@ export default function ReportsScreen({ route, navigation }: Props) {
   const [sortDesc, setSortDesc] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+// Remove the debugStorage function and replace the useEffect with:
+useEffect(() => {
+  console.log('Component mounted, loading reports...');
+  loadReports();
+}, [loadReports]);
+
+// Temporary debug - remove after testing
+const logReportIds = (reports: Report[], label: string) => {
+  console.log(`=== ${label} ===`);
+  reports.forEach((r, i) => {
+    console.log(`${i}: ID=${r.id}, ServerID=${r.serverId}, Name=${r.clientName}`);
+  });
+  console.log(`Total: ${reports.length}`);
+};
+
+// Auto-sync when screen comes into focus
+useFocusEffect(
+  useCallback(() => {
+    syncFromServer();
+  }, [syncFromServer])
+);
+
   // Header: title + "+ New" action
   useEffect(() => {
-    navigation.setOptions({
-      title: `${productName} Reports`,
-      headerRight: () => (
+  navigation.setOptions({
+    title: `${productName} Reports`,
+    headerRight: () => (
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <TouchableOpacity
+          onPress={syncFromServer}
+          style={{ marginRight: 15, opacity: refreshing ? 0.5 : 1 }}
+          disabled={refreshing}
+        >
+          <Text style={styles.headerAction}>
+            {refreshing ? '⟳ Syncing...' : '⟳ Sync'}
+          </Text>
+        </TouchableOpacity>
         <TouchableOpacity
           onPress={() => navigation.navigate('AddReport', { productId })}
         >
           <Text style={styles.headerAction}>+ New</Text>
         </TouchableOpacity>
-      ),
-    });
-  }, [navigation, productName, productId]);
+      </View>
+    ),
+  });
+}, [navigation, productName, productId, syncFromServer, refreshing]);
 
   const loadReports = useCallback(async () => {
-    setError(null);
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY(productId));
-      if (raw) {
-        const parsed: Report[] = JSON.parse(raw);
-        setReports(parsed);
-      } else {
-        setReports([]);
-      }
-    } catch (e) {
-      setError('Failed to load reports.');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+  setError(null);
+  try {
+    const userId = await AsyncStorage.getItem('user_id');
+    console.log('Loading reports for user:', userId, 'product:', productId);
+    
+    if (!userId) {
+      console.log('No user ID found');
+      setReports([]);
+      return;
     }
-  }, [productId]);
+    
+    const storageKey = STORAGE_KEY(productId, userId);
+    console.log('Using storage key:', storageKey);
+    
+    const raw = await AsyncStorage.getItem(storageKey);
+    console.log('Raw data found:', raw ? 'Yes' : 'No');
+    
+    if (raw) {
+      const parsed: Report[] = JSON.parse(raw);
+      console.log('Loaded reports count:', parsed.length);
+      console.log('First report:', parsed[0]?.clientName);
+      setReports(parsed);
+    } else {
+      console.log('No data found for key:', storageKey);
+      setReports([]);
+    }
+  } catch (e) {
+    console.error('Error loading reports:', e);
+    setError('Failed to load reports.');
+    setReports([]);
+  } finally {
+    setLoading(false);
+    setRefreshing(false);
+  }
+}, [productId]);
 
-  // Use useFocusEffect to reload when coming back from ReportDetails
-  useFocusEffect(
-    useCallback(() => {
-      loadReports();
-    }, [loadReports])
-  );
+const syncFromServer = useCallback(async () => {
+  setError(null);
+  setRefreshing(true);
+ 
+  try {
+    console.log('Starting sync from server...');
+   
+    const serverReports = await getMyReports();
+    console.log('Server reports received:', serverReports.length);
 
-  const saveReports = useCallback(
-    async (next: Report[]) => {
-      setReports(next);
-      await AsyncStorage.setItem(STORAGE_KEY(productId), JSON.stringify(next));
-    },
-    [productId]
-  );
+    const userData = await AsyncStorage.getItem('user');
+    const userId = userData ? JSON.parse(userData).id : await AsyncStorage.getItem('user_id');
+    
+    if (!userId) {
+      console.log('No user ID found during sync');
+      setRefreshing(false);
+      return;
+    }
+   
+    const storageKey = STORAGE_KEY(productId, userId);
+    const localRaw = await AsyncStorage.getItem(storageKey);
+    const localReports: Report[] = localRaw ? JSON.parse(localRaw) : [];
+    console.log('Local reports found:', localReports.length);
+
+    const finalReports: Report[] = [];
+    const processedServerIds = new Set<string>();
+
+    // Process server reports first
+    serverReports.forEach((serverReport: any, index: number) => {
+      const serverId = serverReport.reportId;
+      processedServerIds.add(serverId);
+      
+      // Try to find matching local report
+      const matchingLocal = localReports.find(local => 
+        local.serverId === serverId ||
+        (local.clientName === serverReport.schoolName && 
+         local.contactPhone === serverReport.contactPhone &&
+         local.visitDate === serverReport.reportDate)
+      );
+      
+      if (matchingLocal) {
+        // Update existing local report with server data
+        const mergedReport: Report = {
+          ...matchingLocal,
+          serverId: serverId,
+          clientName: serverReport.schoolName || matchingLocal.clientName,
+          clientAddress: serverReport.schoolAddress || matchingLocal.clientAddress || '',
+          town: serverReport.town || matchingLocal.town || '',
+          localGovernment: serverReport.localGovernment || matchingLocal.localGovernment || '',
+          state: serverReport.state || matchingLocal.state || '',
+          community: serverReport.community || matchingLocal.community || '',
+          nearestLandmark: serverReport.nearestBusStop || matchingLocal.nearestLandmark || '',
+          latitude: String(serverReport.latitude || matchingLocal.latitude || ''),
+          longitude: String(serverReport.longitude || matchingLocal.longitude || ''),
+          contactPerson: serverReport.contactPerson || matchingLocal.contactPerson || '',
+          contactPhone: serverReport.contactPhone || matchingLocal.contactPhone || '',
+          visitDate: serverReport.reportDate || matchingLocal.visitDate || '',
+          serviceType: serverReport.benchmark || matchingLocal.serviceType || '',
+          images: serverReport.imageUrl ? [serverReport.imageUrl] : (matchingLocal.images || []),
+          updatedAt: serverReport.reportDate || matchingLocal.updatedAt || new Date().toISOString(),
+        };
+        
+        finalReports.push(mergedReport);
+      } else {
+        // New report from server
+        const newReport: Report = {
+          id: `server_${serverId}`,
+          serverId: serverId,
+          productId: productId,
+          clientName: serverReport.schoolName || '',
+          clientAddress: serverReport.schoolAddress || '',
+          town: serverReport.town || '',
+          localGovernment: serverReport.localGovernment || '',
+          state: serverReport.state || '',
+          community: serverReport.community || '',
+          nearestLandmark: serverReport.nearestBusStop || '',
+          latitude: String(serverReport.latitude || ''),
+          longitude: String(serverReport.longitude || ''),
+          contactPerson: serverReport.contactPerson || '',
+          contactPhone: serverReport.contactPhone || '',
+          visitDate: serverReport.reportDate || '',
+          serviceType: serverReport.benchmark || '',
+          status: 'Contacted' as Report['status'],
+          notes: '',
+          images: serverReport.imageUrl ? [serverReport.imageUrl] : [],
+          createdAt: serverReport.reportDate || new Date().toISOString(),
+          updatedAt: serverReport.reportDate || new Date().toISOString(),
+        };
+        
+        finalReports.push(newReport);
+      }
+    });
+
+    // Add local-only reports that don't have serverIds or weren't matched
+    localReports.forEach(localReport => {
+      if (!localReport.serverId && !processedServerIds.has(localReport.id)) {
+        finalReports.push(localReport);
+      }
+    });
+
+    console.log('Final reports count:', finalReports.length);
+   
+    // Save merged data
+    await AsyncStorage.setItem(storageKey, JSON.stringify(finalReports));
+    setReports(finalReports);
+   
+    console.log('Sync completed successfully');
+   
+  } catch (error) {
+    console.error('Sync failed:', error);
+    setError('Failed to sync with server. Showing local data.');
+    await loadReports();
+  } finally {
+    setRefreshing(false);
+  }
+}, [productId, loadReports]);
 
   const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    loadReports();
-  }, [loadReports]);
+  syncFromServer();
+}, [syncFromServer]);
 
   const filtered = useMemo(() => {
     let data = reports;
@@ -182,6 +337,9 @@ export default function ReportsScreen({ route, navigation }: Props) {
         style: 'destructive',
         onPress: async () => {
           try {
+            const userId = await AsyncStorage.getItem('user_id');
+            if (!userId) return;
+            
             const next = reports.filter((r) => r.id !== id);
             await saveReports(next);
           } catch {
@@ -222,7 +380,8 @@ export default function ReportsScreen({ route, navigation }: Props) {
     style={styles.item}
     onPress={() => navigation.navigate('ReportDetails', { 
       report: item, 
-      productId: productId 
+      productId: productId,
+      productName: productName 
     })}
     onLongPress={() => handleDelete(item.id)}
   >
@@ -306,13 +465,27 @@ export default function ReportsScreen({ route, navigation }: Props) {
         </View>
       ) : (
         <FlatList
-          data={filtered}
-          keyExtractor={(r) => r.id}
-          renderItem={renderItem}
-          contentContainerStyle={{ paddingBottom: 24 }}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          ListHeaderComponent={error ? <Text style={styles.error}>{error}</Text> : null}
-        />
+  data={filtered}
+  keyExtractor={(item, index) => `${item.id}_${index}`} // More unique key
+  renderItem={renderItem}
+  refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+  contentContainerStyle={filtered.length === 0 ? styles.emptyContainer : undefined}
+  ListEmptyComponent={
+    <View style={styles.emptyContainer}>
+      <Text style={styles.emptyText}>
+        {error || 'No reports found for this product.'}
+      </Text>
+      {!error && (
+        <TouchableOpacity
+          style={styles.addButton}
+          onPress={() => navigation.navigate('AddReport', { productId })}
+        >
+          <Text style={styles.addButtonText}>+ Add First Report</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  }
+/>
       )}
 
       {/* Floating + New */}

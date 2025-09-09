@@ -22,13 +22,14 @@ import uuid from 'react-native-uuid';
 import * as ImagePicker from 'expo-image-picker';
 import { Picker } from '@react-native-picker/picker';
 import * as Location from 'expo-location';
+import { syncReports, createReport } from '../src/services/api';
 
 // ✅ Import Nigeria states + LGAs from your local dataset
-import { nigerianStatesAndLGAs } from '../components/nigerianStatesLgas';
+import { nigerianStatesAndLGAs } from '../src/components/nigerianStatesLgas';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AddReport'>;
 
-const STORAGE_KEY = (productId: string) => `reports:${productId}`;
+const STORAGE_KEY = (productId: string, userId: string) => `reports:${userId}:${productId}`;
 
 const statuses: Report['status'][] = [
   'Contacted',
@@ -375,66 +376,171 @@ export default function AddReportScreen({ route, navigation }: Props) {
     setImages((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // --------------------- Save Report ---------------------
-  const handleSave = async () => {
-    if (!clientName.trim()) return Alert.alert('Validation Error', 'Client Name is required.');
-    if (!contactPerson.trim()) return Alert.alert('Validation Error', 'Contact Person is required.');
-    if (!contactPhone.trim()) return Alert.alert('Validation Error', 'Contact Phone is required.');
-    if (!visitDate.trim()) return Alert.alert('Validation Error', 'Visit Date is required.');
-    if (status === 'Other' && !customStatus.trim())
-      return Alert.alert('Validation Error', 'Please specify the custom status.');
-    if (!state.trim()) return Alert.alert('Validation Error', 'State is required.');
-    if (!localGovernment.trim())
-      return Alert.alert('Validation Error', 'Local Government Area is required.');
+  const getMarketerIdFromStorage = async (): Promise<string> => {
+  try {
+    // Try the direct user_id first (most reliable)
+    let userId = await AsyncStorage.getItem('user_id');
+    if (userId) return userId;
+    
+    // Fallback to user object
+    const userData = await AsyncStorage.getItem('user');
+    if (userData) {
+      const parsedUser = JSON.parse(userData);
+      userId = parsedUser.id || parsedUser.user_id;
+      if (userId) {
+        // Save it as user_id for consistency
+        await AsyncStorage.setItem('user_id', userId);
+        return userId;
+      }
+    }
+    return 'unknown';
+  } catch (error) {
+    console.error('Error getting marketer ID:', error);
+    return 'unknown';
+  }
+};
 
+const handleSave = async () => {
+  if (!clientName.trim()) return Alert.alert('Validation Error', 'Client Name is required.');
+  if (!contactPerson.trim()) return Alert.alert('Validation Error', 'Contact Person is required.');
+  if (!contactPhone.trim()) return Alert.alert('Validation Error', 'Contact Phone is required.');
+  if (!visitDate.trim()) return Alert.alert('Validation Error', 'Visit Date is required.');
+  if (status === 'Other' && !customStatus.trim())
+    return Alert.alert('Validation Error', 'Please specify the custom status.');
+  if (!state.trim()) return Alert.alert('Validation Error', 'State is required.');
+  if (!localGovernment.trim())
+    return Alert.alert('Validation Error', 'Local Government Area is required.');
+  if (!contactPhone.trim() || !phoneValidation.isValid) 
+    return Alert.alert('Validation Error', 'Please enter a valid phone number.');
+
+  try {
+    setSaving(true);
+    
+    const userId = await getMarketerIdFromStorage();
+    if (userId === 'unknown') {
+      Alert.alert('Error', 'Unable to identify user. Please log in again.');
+      return;
+    }
+    
+    const now = new Date().toISOString();
+    const finalStatus = status === 'Other' ? customStatus.trim() : status;
+    const reportId = String(uuid.v4());
+
+    // Create report data for server
+    const serverReportData = {
+      reportId,
+      marketerId: userId,
+      productId: productId,
+      schoolName: clientName.trim(),
+      schoolAddress: clientAddress.trim(),
+      town: town.trim(),
+      localGovernment: localGovernment.trim(),
+      state: state.trim(),
+      community: community.trim(),
+      nearestBusStop: nearestLandmark.trim(),
+      benchmark: serviceType.trim(),
+      latitude: latitude.trim() ? parseFloat(latitude.trim()) : null,
+      longitude: longitude.trim() ? parseFloat(longitude.trim()) : null,
+      contactPerson: contactPerson.trim(),
+      contactPhone: contactPhone.trim(),
+      reportDate: visitDate,
+      imageUrl: images.length > 0 ? images[0] : null,
+    };
+
+    // Create report immediately on server
+    let serverId = null;
     try {
-      setSaving(true);
-      const raw = await AsyncStorage.getItem(STORAGE_KEY(productId));
-      const existing: Report[] = raw ? JSON.parse(raw) : [];
-      const now = new Date().toISOString();
-      const finalStatus = status === 'Other' ? customStatus.trim() : status;
+      const serverResponse = await createReport(serverReportData);
+      serverId = serverResponse.reportId || reportId;
+      console.log('Report created on server with ID:', serverId);
+    } catch (apiError) {
+      console.error('Failed to create report on server:', apiError);
+      // Continue with local save, will sync later
+    }
 
-      const newReport: Report = {
-        id: String(uuid.v4()),
-        productId,
-        clientName: clientName.trim(),
-        clientAddress: clientAddress.trim(),
-        town: town.trim(),
-        localGovernment: localGovernment.trim(),
-        state: state.trim(),
-        community: community.trim(),
-        nearestLandmark: nearestLandmark.trim(),
-        latitude: latitude.trim(),
-        longitude: longitude.trim(),
-        contactPerson: contactPerson.trim(),
-        contactPhone: contactPhone.trim(),
-        visitDate,
-        serviceType: serviceType.trim(),
-        status: finalStatus as Report['status'],
-        notes: notes.trim(),
-        images: [...images],
-        createdAt: now,
-        updatedAt: now,
-      };
+    // Create local report
+    const localReport: Report = {
+      id: reportId,
+      serverId: serverId,
+      productId,
+      clientName: clientName.trim(),
+      clientAddress: clientAddress.trim(),
+      town: town.trim(),
+      localGovernment: localGovernment.trim(),
+      state: state.trim(),
+      community: community.trim(),
+      nearestLandmark: nearestLandmark.trim(),
+      latitude: latitude.trim(),
+      longitude: longitude.trim(),
+      contactPerson: contactPerson.trim(),
+      contactPhone: contactPhone.trim(),
+      visitDate,
+      serviceType: serviceType.trim(),
+      status: finalStatus as Report['status'],
+      notes: notes.trim(),
+      images: [...images],
+      createdAt: now,
+      updatedAt: now,
+    };
 
-      const updated = [newReport, ...existing];
-      await AsyncStorage.setItem(STORAGE_KEY(productId), JSON.stringify(updated));
+    // Save locally
+    const storageKey = STORAGE_KEY(productId, userId);
+    const existingRaw = await AsyncStorage.getItem(storageKey);
+    const existing: Report[] = existingRaw ? JSON.parse(existingRaw) : [];
+    const updated = [localReport, ...existing];
+    await AsyncStorage.setItem(storageKey, JSON.stringify(updated));
 
-      Alert.alert('Success', 'Report saved successfully!', [
+    if (serverId) {
+      Alert.alert('Success', 'Report created and synced successfully!', [
         { text: 'OK', onPress: () => navigation.goBack() },
       ]);
-    } catch (error) {
-      console.error('Save error:', error);
-      Alert.alert('Error', 'Failed to save report. Please try again.');
-    } finally {
-      setSaving(false);
+    } else {
+      Alert.alert('Saved Locally', 'Report saved locally. Will sync when connection is available.', [
+        { text: 'OK', onPress: () => navigation.goBack() },
+      ]);
     }
-  };
+
+  } catch (error) {
+    console.error('Save error:', error);
+    Alert.alert('Error', 'Failed to save report. Please try again.');
+  } finally {
+    setSaving(false);
+  }
+};
 
   const handleStatusSelect = (selectedStatus: Report['status']) => {
     setStatus(selectedStatus);
     if (selectedStatus !== 'Other') setCustomStatus('');
   };
+
+  // Add this function after your existing functions
+const validatePhoneNumber = (phone) => {
+  // Remove all non-digit characters except +
+  const cleaned = phone.replace(/[^\d+]/g, '');
+  
+  // Check for valid formats
+  if (cleaned.match(/^\+234\d{10}$/)) {
+    return { isValid: true, message: 'Valid Nigerian number with country code' };
+  } else if (cleaned.match(/^\d{11}$/)) {
+    return { isValid: true, message: 'Valid Nigerian number' };
+  } else if (cleaned.length === 0) {
+    return { isValid: false, message: '' };
+  } else if (cleaned.startsWith('+')) {
+    return { isValid: false, message: 'Invalid format. Use +234xxxxxxxxxx' };
+  } else {
+    return { isValid: false, message: 'Invalid format. Use 11 digits or +234xxxxxxxxxx' };
+  }
+};
+
+// Add this state after your existing states
+const [phoneValidation, setPhoneValidation] = useState({ isValid: false, message: '' });
+
+// Replace your existing setContactPhone calls with this function
+const handlePhoneChange = (phone) => {
+  setContactPhone(phone);
+  const validation = validatePhoneNumber(phone);
+  setPhoneValidation(validation);
+};
 
   // --------------------- Render ---------------------
   return (
@@ -453,12 +559,12 @@ export default function AddReportScreen({ route, navigation }: Props) {
       {/* Form */}
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 100 : 0}
       >
         <ScrollView
           style={styles.scrollContainer}
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={styles.scrollContentImproved}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
@@ -559,16 +665,6 @@ export default function AddReportScreen({ route, navigation }: Props) {
                   placeholder="e.g. 6.5244"
                   keyboardType="numeric"
                 />
-                <TouchableOpacity
-                  onPress={getAndFillLocation}
-                  style={[styles.locationButton, locLoading && styles.locationButtonDisabled]}
-                  disabled={locLoading}
-                >
-                  <Text style={styles.locationButtonText}>
-                    {locLoading ? 'Getting location…' : 'Use Current Location'}
-                  </Text>
-                </TouchableOpacity>
-
               </View>
               <View style={styles.halfWidth}>
                 <InputField
@@ -578,17 +674,19 @@ export default function AddReportScreen({ route, navigation }: Props) {
                   placeholder="e.g. 3.3792"
                   keyboardType="numeric"
                 />
-                <TouchableOpacity
-                  onPress={getAndFillLocation}
-                  style={[styles.locationButton, locLoading && styles.locationButtonDisabled]}
-                  disabled={locLoading}
-                >
-                  <Text style={styles.locationButtonText}>
-                    {locLoading ? 'Getting location…' : 'Use Current Location'}
-                  </Text>
-                </TouchableOpacity>
               </View>
             </View>
+
+            {/* Single centered location button */}
+            <TouchableOpacity
+              onPress={getAndFillLocation}
+              style={[styles.locationButtonCentered, locLoading && styles.locationButtonDisabled]}
+              disabled={locLoading}
+            >
+              <Text style={styles.locationButtonText}>
+                {locLoading ? 'Getting location…' : 'Use Current Location'}
+              </Text>
+            </TouchableOpacity>
 
             <InputField
               label="Contact Person"
@@ -598,14 +696,34 @@ export default function AddReportScreen({ route, navigation }: Props) {
               required
             />
 
-            <InputField
-              label="Contact Phone"
+          <View style={styles.inputContainer}>
+            <Text style={styles.label}>
+              Contact Phone <Text style={styles.required}>*</Text>
+            </Text>
+            <TextInput
+              style={[
+                styles.input,
+                contactPhone && !phoneValidation.isValid && styles.inputError,
+                contactPhone && phoneValidation.isValid && styles.inputSuccess,
+              ]}
+              placeholder="+234 xxx xxxx xxx or 080xxxxxxxx"
               value={contactPhone}
-              onChangeText={setContactPhone}
-              placeholder="+234 xxx xxxx xxx"
+              onChangeText={handlePhoneChange}
               keyboardType="phone-pad"
-              required
+              placeholderTextColor="#94A3B8"
+              autoCorrect={false}
             />
+            {contactPhone && phoneValidation.message && (
+              <Text
+                style={[
+                  styles.validationText,
+                  phoneValidation.isValid ? styles.validationSuccess : styles.validationError,
+                ]}
+              >
+                {phoneValidation.message}
+              </Text>
+            )}
+          </View>
 
             <View style={styles.sectionDivider} />
 
@@ -807,8 +925,8 @@ const styles = StyleSheet.create({
   scrollContainer: {
     flex: 1,
   },
-  scrollContent: {
-    paddingBottom: 30,
+  scrollContentImproved: {
+  paddingBottom: 100, // Increased padding for better keyboard handling
   },
   formContainer: {
     margin: 20,
@@ -1150,5 +1268,40 @@ locationButtonDisabled: {
 locationButtonText: {
   color: '#0B1220',
   fontWeight: '600',
+},
+locationButtonCentered: {
+  alignSelf: 'center',
+  backgroundColor: '#0EA5E9',
+  paddingVertical: 12,
+  paddingHorizontal: 20,
+  borderRadius: 12,
+  marginTop: 0,
+  marginBottom: 18,
+  flexDirection: 'row',
+  alignItems: 'center',
+},
+
+inputError: {
+  borderColor: '#EF4444',
+  backgroundColor: '#FEF2F2',
+},
+
+inputSuccess: {
+  borderColor: '#10B981',
+  backgroundColor: '#F0FDF4',
+},
+
+validationText: {
+  fontSize: 14,
+  marginTop: 6,
+  fontWeight: '500',
+},
+
+validationError: {
+  color: '#EF4444',
+},
+
+validationSuccess: {
+  color: '#10B981',
 },
 });

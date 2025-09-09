@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,8 +13,14 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
 
-const STORAGE_KEY = 'userProfile';
+const getUserProfileKey = async () => {
+  const userData = await AsyncStorage.getItem('user');
+  const userId = userData ? JSON.parse(userData).id : 'default';
+  return `userProfile:${userId}`;
+};
+
 const { width } = Dimensions.get('window');
 
 export default function ProfileScreen({ navigation }) {
@@ -28,21 +34,54 @@ export default function ProfileScreen({ navigation }) {
   const [originalProfile, setOriginalProfile] = useState({});
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
-  useEffect(() => {
-    const loadProfile = async () => {
-      try {
-        const saved = await AsyncStorage.getItem(STORAGE_KEY);
-        if (saved) {
-          const parsedProfile = JSON.parse(saved);
-          setProfile(parsedProfile);
-          setOriginalProfile(parsedProfile);
-        }
-      } catch (error) {
-        Alert.alert('Error', 'Failed to load profile');
-      }
-    };
+  // Add this after your existing useEffect
+useFocusEffect(
+  useCallback(() => {
     loadProfile();
-  }, []);
+  }, [])
+);
+
+  const loadProfile = async () => {
+  try {
+    // First try to load from server
+    try {
+      console.log('Loading profile from server...');
+      const serverProfile = await getUserProfile();
+      
+      if (serverProfile) {
+        console.log('Profile loaded from server:', serverProfile);
+        setProfile(serverProfile);
+        setOriginalProfile(serverProfile);
+        
+        // Also save to local storage for offline access
+        const storageKey = await getUserProfileKey();
+        await AsyncStorage.setItem(storageKey, JSON.stringify(serverProfile));
+        return;
+      }
+    } catch (serverError) {
+      console.log('Failed to load profile from server:', serverError);
+      // This is normal if the user hasn't created a server profile yet
+    }
+    
+    // Fallback to local storage
+    console.log('Loading profile from local storage...');
+    const storageKey = await getUserProfileKey();
+    const saved = await AsyncStorage.getItem(storageKey);
+    if (saved) {
+      const parsedProfile = JSON.parse(saved);
+      setProfile(parsedProfile);
+      setOriginalProfile(parsedProfile);
+    } else {
+      // Reset to empty profile for new user
+      const emptyProfile = { name: '', email: '', phone: '', image: '', bio: '' };
+      setProfile(emptyProfile);
+      setOriginalProfile(emptyProfile);
+    }
+  } catch (error) {
+    console.error('Error loading profile:', error);
+    Alert.alert('Error', 'Failed to load profile');
+  }
+};
 
   // Check for changes whenever profile updates
   useEffect(() => {
@@ -114,15 +153,31 @@ export default function ProfileScreen({ navigation }) {
   };
 
   const saveProfile = async () => {
+  try {
+    const storageKey = await getUserProfileKey();
+    
+    // Save locally first
+    await AsyncStorage.setItem(storageKey, JSON.stringify(profile));
+    setOriginalProfile(profile);
+    setHasUnsavedChanges(false);
+    
+    // Try to sync to server
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
-      setOriginalProfile(profile);
-      setHasUnsavedChanges(false);
-      Alert.alert('Success', 'Profile saved successfully');
-    } catch (error) {
-      Alert.alert('Error', 'Failed to save profile');
+      console.log('Syncing profile to server...');
+      await updateUserProfile(profile);
+      console.log('Profile synced to server successfully');
+      Alert.alert('Success', 'Profile saved and synced successfully');
+    } catch (serverError) {
+      console.error('Failed to sync profile to server:', serverError);
+      // Still show success since local save worked
+      Alert.alert('Success', 'Profile saved locally. Will sync when connection is restored.');
     }
-  };
+    
+  } catch (error) {
+    console.error('Error saving profile:', error);
+    Alert.alert('Error', 'Failed to save profile');
+  }
+};
 
   const discardChanges = () => {
     Alert.alert(
@@ -170,16 +225,17 @@ export default function ProfileScreen({ navigation }) {
 
 const confirmLogout = async () => {
   try {
-    // Clear any stored authentication data
-    // await AsyncStorage.removeItem('authToken');
-    // await AsyncStorage.removeItem('userInfo');
-    // Or however you're storing auth data
+    // Clear authentication data
+    await AsyncStorage.removeItem('token');
+    await AsyncStorage.removeItem('user');
+    await AsyncStorage.removeItem('user_id');
     
-    // Reset navigation stack to Login screen
+    // Use replace instead of reset to make it seem like a fresh app start
     navigation.reset({
       index: 0,
       routes: [{ name: 'Login' }],
     });
+    
   } catch (error) {
     console.error('Logout error:', error);
     Alert.alert('Error', 'Failed to logout. Please try again.');

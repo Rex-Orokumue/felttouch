@@ -16,7 +16,11 @@ import { RootStackParamList } from '../App';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
-const STORAGE_KEY = 'userProfile';
+const getUserProfileKey = async () => {
+  const userData = await AsyncStorage.getItem('user');
+  const userId = userData ? JSON.parse(userData).id : 'default';
+  return `userProfile:${userId}`;
+};
 
 // Clean product data for digital agency
 const products = [
@@ -66,15 +70,25 @@ export default function HomeScreen({ navigation }: Props) {
 
   // Load profile data when screen is focused
   const loadProfile = async () => {
-    try {
-      const saved = await AsyncStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        setProfile(JSON.parse(saved));
-      }
-    } catch (error) {
-      console.log('Error loading profile:', error);
+  try {
+    const storageKey = await getUserProfileKey();
+    const saved = await AsyncStorage.getItem(storageKey);
+    if (saved) {
+      setProfile(JSON.parse(saved));
+    } else {
+      // Set empty profile for new user
+      setProfile({
+        name: '',
+        email: '',
+        phone: '',
+        image: '',
+        bio: '',
+      });
     }
-  };
+  } catch (error) {
+    console.log('Error loading profile:', error);
+  }
+};
 
   // Use useFocusEffect to reload profile when screen is focused
   useFocusEffect(
